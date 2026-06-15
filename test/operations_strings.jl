@@ -11,7 +11,7 @@ Ns = (10, 70, 200)
             _, ka = anticommutator(a, b)
             @test commutes(a, b) == (kc == 0)
             @test anticommutes(a, b) == (ka == 0)
-            _, kp = prod(a, b)
+            _, kp = PauliStrings.prod(a, b)
             @test kp == PauliStrings.pauli_prod_phase(a.v, b.w)
         end
     end
