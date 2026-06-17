@@ -49,7 +49,9 @@ Build a first-order (`order=1`, Lie) or second-order (`order=2`, Strang) Trotter
 `exp(im * H * dt / hbar)` (Heisenberg) or the conjugate sequence (Schrödinger / density matrix).
 Each gate uses [`pauli_rotation`](@ref) with the returned `theta` field.
 
-For `H::Operator{<:PauliStringTS}`, see the specialized [`trotterize`](@ref) that calls [`resum`](@ref) first.
+For `H::Operator{<:PauliStringTS}`, see the specialized [`trotterize`](@ref) overload
+that expands via [`resum`](@ref) and returns the same [`TrotterGate`](@ref) list as on the
+dense Hamiltonian.
 """
 function trotterize(H::Operator, dt::Real; order::Integer=2, heisenberg::Bool=true, hbar::Real=1)
     order ∈ (1, 2) || throw(ArgumentError("order must be 1 or 2, got $order"))
@@ -63,6 +65,23 @@ function trotterize(H::Operator, dt::Real; order::Integer=2, heisenberg::Bool=tr
     else
         return _strang_gates(H, dt, hbar, heisenberg)
     end
+end
+
+"""
+    trotterize(H::Operator{<:PauliStringTS}, dt::Real; order=2, heisenberg=true, hbar=1)
+
+Build Trotter gates for a translation-symmetric Hamiltonian. The Hamiltonian is
+expanded via [`resum`](@ref) so the Strang splitting uses all translated terms.
+"""
+function trotterize(H::Operator{<:PauliStringTS}, dt::Real; order::Integer=2, heisenberg::Bool=true, hbar::Real=1)
+    return trotterize(resum(H), dt; order=order, heisenberg=heisenberg, hbar=hbar)
+end
+
+"""Fold a plain operator (e.g. after evolving `resum(O)`) back to `OperatorTS` conventions."""
+function _plain_to_ts(Or::Operator, Ls::Tuple, Ps::Tuple)
+    Ots = OperatorTS{Ls, Ps}(Or)
+    num_translations = Base.prod(L for (L, p) in zip(Ls, Ps) if p)
+    return Ots / num_translations
 end
 
 """
@@ -105,5 +124,34 @@ function trotter_step!(O::Operator, gates::AbstractVector{<:TrotterGate}; trunca
         append!(O.strings, O2.strings)
         append!(O.coeffs, O2.coeffs)
     end
+    return O
+end
+
+"""
+    trotter_step!(O::Operator{<:PauliStringTS}, gates::AbstractVector{<:TrotterGate}; truncation::Function=identity, truncate_every::Int=1)
+
+Apply one Trotter step to a translation-symmetric operator. The operator is
+expanded with [`resum`](@ref), gates are applied without intermediate truncation,
+then the result is folded back to [`OperatorTS`](@ref) and passed through
+`truncation` once at the end of the step.
+"""
+function trotter_step!(
+        O::Operator{<:PauliStringTS},
+        gates::AbstractVector{<:TrotterGate};
+        truncation::Function=identity,
+        truncate_every::Int=1)
+    truncate_every == 1 || throw(ArgumentError(
+        "truncate_every > 1 is not supported for translation-symmetric operators; " *
+        "truncation is applied once after folding back to OperatorTS"))
+    isempty(gates) && return O
+    Ls = qubitsize(O)
+    Ps = periodicflags(O)
+    Or = resum(O)
+    trotter_step!(Or, gates; truncation=identity)
+    folded = truncation(_plain_to_ts(Or, Ls, Ps))
+    empty!(O.strings)
+    empty!(O.coeffs)
+    append!(O.strings, folded.strings)
+    append!(O.coeffs, folded.coeffs)
     return O
 end

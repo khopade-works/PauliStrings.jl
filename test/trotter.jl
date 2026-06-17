@@ -87,3 +87,61 @@ end
     trotter_step!(O, TrotterGate{P2,Float64}[])
     @test norm(O - O0) < 1e-14
 end
+
+@testset "translation-symmetric trotterize gate count" begin
+    N = 16
+    H = Operator(N)
+    H += -0.5, "X", 1
+    H += -0.25, "Z", 2
+    H += "Z", 1, "Z", 2
+    Hts = OperatorTS{(N,)}(H)
+    dt = 0.1
+    g_ts = trotterize(Hts, dt; order=2)
+    g_exp = trotterize(resum(Hts), dt; order=2)
+    @test g_ts == g_exp
+    @test length(g_ts) == 2 * length(resum(Hts)) - 1
+    @test length(g_ts) > 2 * length(Hts) - 1
+end
+
+@testset "translation-symmetric trotter_step! matches plain resum path" begin
+    N = 4
+    H = Operator(N)
+    H += -0.3, "X", 1
+    H += "Z", 1, "Z", 2
+    Hts = OperatorTS{(N,)}(H)
+    Ots = OperatorTS{(N,)}(Operator(N) + ("X", 1))
+    dt = 0.05
+    for order in (1, 2)
+        g = trotterize(Hts, dt; order=order)
+        O_ref = copy(Ots)
+        trotter_step!(O_ref, g; truncation=identity)
+        Or = resum(Ots)
+        trotter_step!(Or, g; truncation=identity)
+        @test trace_product(Ots, O_ref) ≈ trace_product(resum(Ots), Or)
+        rel = norm(Matrix(resum(O_ref)) - Matrix(Or)) / norm(Matrix(Or))
+        @test rel < (order == 1 ? 0.01 : 1e-3)
+    end
+end
+
+@testset "translation-symmetric trotter vs exact Heisenberg" begin
+    N = 4
+    H = Operator(N)
+    H += 0.4, "X", 1
+    H += 0.5, "Z", 1, "Z", 2
+    Hts = OperatorTS{(N,)}(H)
+    Ots = OperatorTS{(N,)}(Operator(N) + ("Y", 1))
+    dt = 0.08
+    Mex = heisenberg_exact(resum(Hts), resum(Ots), dt)
+    Ot = copy(Ots)
+    g = trotterize(Hts, dt; order=2)
+    trotter_step!(Ot, g; truncation=identity)
+    @test norm(Matrix(resum(Ot)) - Mex) < 1e-3
+end
+
+@testset "translation-symmetric trotter empty gates" begin
+    O = OperatorTS{(4,)}(Operator(4) + ("Z", 1))
+    O0 = copy(O)
+    P4 = paulistringtype(O)
+    trotter_step!(O, TrotterGate{P4, Float64}[])
+    @test norm(O - O0) < 1e-14
+end
