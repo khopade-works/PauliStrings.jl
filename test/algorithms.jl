@@ -80,6 +80,53 @@ end
 end
 
 
+@testset "trace_moment OperatorTS" begin
+    # trace_moment(Hts, k) must agree with trace_product(Hts, k) = trace(H^k)
+    for N in (4, 6, 8)
+        H = ising1D(N, 0.5)
+        Hts = OperatorTS1D(H)
+        for k in 0:8
+            a = trace_moment(Hts, k; scale=1)
+            b = trace_product(Hts, k; scale=1)
+            @test abs(a - b) ≤ 1e-7 * (abs(b) + 1e-9) + 1e-12
+        end
+    end
+
+    # Heisenberg ring has nonzero odd moments
+    for N in (4, 6)
+        H = Operator(N)
+        for j in 1:N
+            H += "X", j, "X", mod1(j + 1, N)
+            H += "Y", j, "Y", mod1(j + 1, N)
+            H += "Z", j, "Z", mod1(j + 1, N)
+        end
+        Hts = OperatorTS1D(H)
+        for k in 0:6
+            a = trace_moment(Hts, k; scale=1)
+            b = trace_product(Hts, k; scale=1)
+            @test abs(a - b) ≤ 1e-7 * (abs(b) + 1e-9) + 1e-12
+        end
+    end
+
+    # scale keyword and k = 0
+    Hts = OperatorTS1D(ising1D(6, 0.5))
+    @test trace_moment(Hts, 4) ≈ trace_product(Hts, 4)
+    @test trace_moment(Hts, 0; scale=1) ≈ trace_product(Hts, 0; scale=1)
+    @test trace_moment(Hts, 0) ≈ trace_product(Hts, 0)
+    @test_throws ArgumentError trace_moment(Hts, -1)
+
+    # 2D translation-symmetric operator
+    for L1 in 2:3, L2 in 3:3
+        Hts = OperatorTS2D(ising2D(L1, L2, 0.6), L1)
+        for k in 1:4
+            a = trace_moment(Hts, k; scale=1)
+            b = trace_product(Hts, k; scale=1)
+            @test abs(a - b) ≤ 1e-7 * (abs(b) + 1e-9) + 1e-12
+        end
+    end
+end
+
+
 @testset "trace_moment A^k B^l" begin
     # trace_moment(A, k, B, l) must agree with trace_product(A, k, B, l) = trace(A^k B^l)
     for N in (4, 6, 8)

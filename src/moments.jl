@@ -198,6 +198,10 @@ mutable struct _MomentWS{P,Cc,T,C}
     cbuf::Vector{Int64}
     extfactor::C   # external weight multiplying each leaf (used by trace(A^k B^l))
     acc::C
+    targetv::T     # XOR target (v); identity for plain trace_moment
+    targetw::T     # XOR target (w)
+    anchorv::T     # v-mask of the anchored first TS factor (seeds canonical sign)
+    anchorc::Cc    # coefficient of the anchored first TS factor
 end
 
 # build a workspace over an operator's terms, sorted by lowest active site
@@ -218,10 +222,11 @@ function _moment_ws(o::Operator, kmax::Int)
         maxsup = max(maxsup, count_ones(strings[i].v | strings[i].w))
     end
     m = max(kmax, 1)
+    z = zero(T)
     return _MomentWS{P,Cc,T,C}(strings, coeffs, reach, maxsup, n,
         Vector{Int}(undef, m), Vector{Int}(undef, m), 0,
         Vector{Bool}(undef, m), Vector{Int}(undef, m), Vector{Int}(undef, m), Vector{Int}(undef, m),
-        Vector{Int64}(undef, 2), one(C), zero(C))
+        Vector{Int64}(undef, 2), one(C), zero(C), z, z, z, one(Cc))
 end
 
 # XOR (as masks) of the current multiset on the stack
@@ -239,7 +244,7 @@ end
 
 # weight * K_ref * Dtilde for the current multiset (the per-block contribution `f`)
 function _block_contribution(ws::_MomentWS{P,Cc,T,C}, r::Int) where {P,Cc,T,C}
-    w = one(Cc)
+    w = ws.anchorc
     @inbounds for j in 1:r
         w *= ws.coeffs[ws.idx[j]]^ws.mult[j]
     end
@@ -248,7 +253,7 @@ end
 
 # +-1 sign of the product of the multiset taken in its canonical (stacked) order
 function _canonical_sign(ws::_MomentWS{P,Cc,T,C}, r::Int) where {P,Cc,T,C}
-    Sv = zero(T)
+    Sv = ws.anchorv
     K = 1
     @inbounds for j in 1:r
         q = ws.strings[ws.idx[j]]
@@ -372,13 +377,14 @@ end
 #  (2) clearing the s active sites of R needs at least ceil(s / maxsup) more terms.
 function _moment_dfs!(ws::_MomentWS{P,Cc,T,C}, i::Int, Rv::T, Rw::T, rem::Int) where {P,Cc,T,C}
     if rem == 0
-        (iszero(Rv) && iszero(Rw)) && _moment_leaf!(ws)
+        (Rv == ws.targetv && Rw == ws.targetw) && _moment_leaf!(ws)
         return nothing
     end
     i > ws.n && return nothing
+    deficit = (Rv ⊻ ws.targetv) | (Rw ⊻ ws.targetw)
     @inbounds reach_i = ws.reach[i]
-    !iszero((Rv | Rw) & ~reach_i) && return nothing
-    rem * ws.maxsup < count_ones(Rv | Rw) && return nothing
+    !iszero(deficit & ~reach_i) && return nothing
+    rem * ws.maxsup < count_ones(deficit) && return nothing
     @inbounds s = ws.strings[i]
     # use term i zero times
     _moment_dfs!(ws, i + 1, Rv, Rw, rem)
@@ -434,6 +440,54 @@ function trace_moment(o::Operator, k::Int; scale=0)
     T = typeof(ws.strings[1].v)
     _moment_dfs!(ws, 1, zero(T), zero(T), k)
     return ws.acc * scaleval
+end
+
+"""
+    trace_moment(o::Operator{<:PauliStringTS}, k::Int; scale=0)
+
+Efficiently compute `trace(o^k)` for a translation-symmetric operator by enumerating only the
+Pauli-string multisets whose product is the identity and summing their phase contributions
+analytically — without ever constructing `o^(k/2)`.
+
+The operator is first expanded to its degree-1 form with [`resum`](@ref) (cheap for a
+Hamiltonian, unlike building a power). Translation invariance is exploited by anchoring the
+first factor to each stored representative and enumerating the remaining `k - 1` factors over
+the resummed alphabet; the result is multiplied by the number of lattice translations.
+
+The result matches [`trace_product`](@ref)`(o, k)` to machine precision.
+
+If `scale` is not 0, then the result is normalized such that `trace(identity)=scale`.
+"""
+function trace_moment(o::Operator{<:PauliStringTS}, k::Int; scale=0)
+    k < 0 && throw(ArgumentError("k must be non-negative"))
+    k == 0 && return trace_product(o, 0; scale=scale)
+    N = qubitlength(o)
+    scaleval = iszero(scale) ? 2.0^N : scale
+    C = scalartype(o)
+    Ls = qubitsize(o)
+    Ps = periodicflags(o)
+    num_translations = Base.prod(L for (L, p) in zip(Ls, Ps) if p)
+
+    H = resum(o)
+    n = length(H.strings)
+    n == 0 && return zero(C) * scaleval
+    length(H.strings) == length(H.coeffs) || throw(DimensionMismatch("strings and coefficients must have the same length"))
+
+    ws = _moment_ws(H, max(k - 1, 1))
+    T = typeof(ws.strings[1].v)
+    z = zero(T)
+    ws.acc = zero(C)
+    ws.extfactor = one(C)
+    for (pts, c) in pairs(o)
+        r0 = representative(pts)
+        ws.targetv = r0.v
+        ws.targetw = r0.w
+        ws.anchorv = r0.v
+        ws.anchorc = c
+        ws.depth = 0
+        _moment_dfs!(ws, 1, z, z, k - 1)
+    end
+    return ws.acc * scaleval * num_translations
 end
 
 # build the table  R -> sum over size-`l` multisets of `o` with XOR = R  of  weight*K_ref*Dtilde
